@@ -3,6 +3,7 @@ import glob
 import pandas as pd
 from datetime import datetime
 
+
 def merge_csv_files():
     """
     合并data文件夹中所有的CSV文件为一个文件
@@ -80,7 +81,12 @@ def merge_csv_files():
     print(f"已成功合并{len(csv_files)}个CSV文件")
     print(f"合并文件已保存为: {output_file}")
 
-if __name__ == "__main__":
+
+def main():
     print("开始合并CSV文件...")
     merge_csv_files()
     print("操作完成。")
+
+
+if __name__ == "__main__":
+    main()

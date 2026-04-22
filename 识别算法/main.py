@@ -5,10 +5,14 @@ from ui import SerialAssistant
 from QCandyUi import CandyWindow
 
 
-if __name__ == "__main__":
+def main():
     app = QApplication(sys.argv)
     main_win = SerialAssistant()
     candy_window = CandyWindow.createWindow(main_win, theme='blueDeep', title='塑料识别系统')
     candy_window.show()
-    sys.exit(app.exec_())
+    return app.exec_()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
 

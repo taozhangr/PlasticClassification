@@ -1,0 +1,20 @@
+[project]
+name = "plastic-classification-app"
+version = "0.1.0"
+description = "Plastic spectrum identification GUI and KNN workflow."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "joblib>=1.5.0",
+    "numpy>=2.0.0",
+    "pandas>=2.2.0",
+    "pyqt5>=5.15.11",
+    "pyqt5-qt5==5.15.2",
+    "pyqt5-sip>=12.11,<13",
+    "pyserial>=3.5",
+    "qcandyui>=0.15",
+    "scikit-learn>=1.6.0",
+]
+
+[tool.uv]
+package = false

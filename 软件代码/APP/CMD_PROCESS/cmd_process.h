@@ -9,7 +9,7 @@ typedef struct
 }Cmd_list_TypeDef;
 
 //指令宏定义
-#define MEASUREMENT		"sc" //测量
+#define MEASUREMENT		"action" //测量
 //指令处理函数
 void cmd_process(void);
 int measurement(void);

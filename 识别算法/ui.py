@@ -1,15 +1,21 @@
 import csv
+from datetime import datetime
+from html import escape
 import os
 from pathlib import Path
 import re
 import sys
+try:
+    import winreg
+except ImportError:
+    winreg = None
 
 import PyQt5
 import serial
 from serial.tools import list_ports
 
-from PyQt5.QtCore import QTimer, Qt, pyqtSignal
-from PyQt5.QtGui import QFont, QPixmap
+from PyQt5.QtCore import QPointF, QRectF, QSize, QTimer, Qt
+from PyQt5.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PyQt5.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -24,13 +30,10 @@ from PyQt5.QtWidgets import (
     QLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
     QSizePolicy,
-    QSpinBox,
     QStackedWidget,
     QStyle,
     QTextEdit,
@@ -61,61 +64,95 @@ def _configure_qt_runtime():
 _configure_qt_runtime()
 
 APP_ROOT = Path(__file__).resolve().parent
-APP_LOGO_PATH = APP_ROOT / "icon" / "logo.png"
+APP_LOGO_PATH = APP_ROOT / "icon" / "logo.ico"
 TRAIN_DATA_FILENAME = "train_data.csv"
 SPECTRUM_CHANNELS = ("R", "S", "T", "U", "V", "W")
 SPECTRUM_VALUE_PATTERN = re.compile(r"([RSTUVW])\[(-?\d+(?:\.\d+)?)\]")
-SCAN_COMMAND = "sc\r\n"
+SCAN_COMMAND = "action\r\n"
 SCAN_TIMEOUT_MS = 5000
+WAVELENGTH_RANGE_TEXT = "610-860 nm"
 
 SPACING_8 = 8
 SPACING_12 = 12
 SPACING_16 = 16
 SPACING_20 = 20
+ICON_BLUE = "#2563eb"
+
+
+def _com_sort_key(port_name):
+    match = re.fullmatch(r"COM(\d+)", port_name.upper())
+    if match:
+        return (0, int(match.group(1)))
+    return (1, port_name)
+
+
+def _list_registry_serial_ports():
+    if winreg is None or sys.platform != "win32":
+        return []
+
+    ports = []
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DEVICEMAP\SERIALCOMM") as key:
+            index = 0
+            while True:
+                try:
+                    _, port_name, _ = winreg.EnumValue(key, index)
+                except OSError:
+                    break
+                if isinstance(port_name, str) and port_name.upper().startswith("COM"):
+                    ports.append(port_name)
+                index += 1
+    except OSError:
+        return []
+
+    return sorted(set(ports), key=_com_sort_key)
+
+
+def _list_available_serial_ports():
+    ports = {}
+    for port in list_ports.comports():
+        ports[port.device] = f"{port.device} - {port.description}"
+
+    # 部分虚拟串口只写入 SERIALCOMM 注册表，pyserial 的 PnP 枚举拿不到。
+    for port_name in _list_registry_serial_ports():
+        ports.setdefault(port_name, f"{port_name} - 虚拟串口")
+
+    return [(port_name, ports[port_name]) for port_name in sorted(ports, key=_com_sort_key)]
 
 LIGHT_STYLESHEET = """
-QMainWindow { background: #f3f5f8; }
+QMainWindow { background: #f5f7fb; }
 QWidget {
     font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "SimHei";
-    font-size: 9px;
+    font-size: 11px;
     color: #24324a;
 }
-QFrame#surface, QFrame#topBar { background: transparent; border: none; }
+QFrame#surface { background: transparent; border: none; }
 QFrame#card, QFrame#metricCard, QFrame#resultInfoCard {
     background: #ffffff;
-    border: 1px solid #e4e9f1;
+    border: 1px solid #e3e9f2;
     border-radius: 12px;
 }
-QFrame#plotContainer {
-    background: #ffffff;
-    border: 1px solid #e5ebf3;
-    border-radius: 10px;
-}
 QFrame#divider {
-    background: #edf1f6;
+    background: #e8edf5;
     border: none;
     min-height: 1px;
     max-height: 1px;
 }
-QLabel#windowTitle { font-size: 9px; font-weight: 500; color: #3d4c66; }
 QLabel#infoTitle { font-size: 14px; font-weight: 700; color: #1a304d; }
-QLabel#sectionTitle { font-size: 12px; font-weight: 700; color: #1d3351; }
-QLabel#fieldLabel { font-size: 9px; font-weight: 600; color: #2c3c57; }
-QLabel#subtitle, QLabel#hintText { font-size: 9px; color: #8b99af; }
-QLabel#metricTitle, QLabel#valueTitle, QLabel#mutedText { font-size: 9px; color: #8492a7; }
-QLabel#metricValue { font-size: 11px; font-weight: 700; color: #1f3552; }
-QLabel#resultName { font-size: 12px; font-weight: 700; color: #1f3553; }
-QLabel#emptyTitle { font-size: 11px; font-weight: 700; color: #5a6a83; }
-QLabel#emptySubtitle { font-size: 9px; color: #8b98ac; }
-QLabel#resultCircle {
-    min-width: 76px; max-width: 76px; min-height: 76px; max-height: 76px;
-    border-radius: 38px;
-    background: #f2f5fa;
-    border: 1px solid #dde4ef;
-    color: #4b5d78;
-    font-size: 22px;
+QLabel#sectionTitle { font-size: 15px; font-weight: 700; color: #172846; }
+QLabel#fieldLabel { font-size: 11px; font-weight: 600; color: #273955; }
+QLabel#subtitle, QLabel#hintText { font-size: 11px; color: #8a97aa; }
+QLabel#metricTitle, QLabel#valueTitle, QLabel#mutedText { font-size: 11px; color: #7c8aa0; }
+QLabel#metricValue { font-size: 13px; font-weight: 700; color: #14243c; }
+QLabel#metricValue[accent="warning"] { color: #f59f00; }
+QLabel#resultName {
+    font-size: 17px;
     font-weight: 700;
+    color: #2563eb;
 }
+QLabel#resultHint { font-size: 11px; color: #8a97aa; }
+QLabel#emptyTitle { font-size: 13px; font-weight: 700; color: #2563eb; }
+QLabel#emptySubtitle { font-size: 11px; color: #8b98ac; }
 QLabel#statusDot, QLabel#statusDotMini {
     min-width: 8px; max-width: 8px; min-height: 8px; max-height: 8px;
     border-radius: 4px;
@@ -123,25 +160,35 @@ QLabel#statusDot, QLabel#statusDotMini {
 QLabel[status="offline"]#statusDot, QLabel[status="offline"]#statusDotMini { background: #b6c2d3; }
 QLabel[status="online"]#statusDot, QLabel[status="online"]#statusDotMini { background: #1dbf73; }
 QLabel#emptyIcon {
-    min-width: 30px; max-width: 30px; min-height: 30px; max-height: 30px;
-    border-radius: 15px;
-    border: 1px solid #d5deea;
-    color: #aab7c9;
-    font-size: 15px;
+    min-width: 36px; max-width: 36px; min-height: 36px; max-height: 36px;
+    border-radius: 18px;
+    border: 1px solid #d8e3f2;
+    color: #93a5bf;
+    font-size: 16px;
     font-weight: 700;
 }
-QPushButton, QComboBox, QLineEdit, QSpinBox {
-    min-height: 28px;
-    max-height: 28px;
-    border-radius: 6px;
-    border: 1px solid #d8e0ec;
+QPushButton {
+    min-height: 30px;
+    max-height: 30px;
+    border-radius: 7px;
+    border: 1px solid #d7e0ec;
     background: #ffffff;
     color: #2b3f5f;
-    padding: 0 6px;
-    font-size: 10px;
+    padding: 0 10px;
+    font-size: 12px;
+}
+QComboBox, QLineEdit {
+    min-height: 34px;
+    max-height: 34px;
+    border-radius: 7px;
+    border: 1px solid #d7e0ec;
+    background: #ffffff;
+    color: #2b3f5f;
+    padding: 0 12px;
+    font-size: 12px;
 }
 QComboBox {
-    padding-right: 24px;
+    padding-right: 22px;
 }
 QComboBox::drop-down {
     subcontrol-origin: padding;
@@ -150,67 +197,27 @@ QComboBox::drop-down {
     border: none;
     background: transparent;
 }
-QSpinBox {
-    padding: 0 24px;
-}
-QPushButton[role="spin_left"], QPushButton[role="spin_right"] {
-    background: #f8fafd;
-    border: 1px solid #d8e0ec;
-    color: #4e6483;
-    font-size: 11px;
-    font-weight: bold;
-    padding: 0;
-    min-height: 28px;
-    max-height: 28px;
-    min-width: 28px;
-    max-width: 28px;
-}
-QPushButton[role="spin_left"] {
-    border-right: none;
-    border-top-left-radius: 6px;
-    border-bottom-left-radius: 6px;
-    border-top-right-radius: 0;
-    border-bottom-right-radius: 0;
-}
-QPushButton[role="spin_right"] {
-    border-left: none;
-    border-top-right-radius: 6px;
-    border-bottom-right-radius: 6px;
-    border-top-left-radius: 0;
-    border-bottom-left-radius: 0;
-}
-QPushButton[role="spin_left"]:hover, QPushButton[role="spin_right"]:hover {
-    background: #eef2f8;
-}
-QPushButton[role="spin_left"]:disabled, QPushButton[role="spin_right"]:disabled {
-    color: #c0cddf;
-}
-QLabel#spinLabel {
-    background: #ffffff;
-    border-top: 1px solid #d8e0ec;
-    border-bottom: 1px solid #d8e0ec;
-    color: #2b3f5f;
-    font-size: 11px;
-}
 QTextEdit {
     min-height: 108px;
     max-height: 16777215px;
-    border-radius: 6px;
-    border: 1px solid #d8e0ec;
+    border-radius: 8px;
+    border: 1px solid #d7e0ec;
     background: #ffffff;
     color: #2b3f5f;
-    padding: 8px;
-    font-size: 11px;
+    padding: 14px;
+    font-size: 12px;
 }
-QPushButton:hover, QComboBox:hover, QLineEdit:hover, QSpinBox:hover {
+QPushButton:hover, QComboBox:hover, QLineEdit:hover {
     border-color: #c3d1e8;
 }
-QPushButton:disabled, QComboBox:disabled, QLineEdit:disabled, QSpinBox:disabled {
+QPushButton:disabled, QComboBox:disabled, QLineEdit:disabled {
     color: #9cabbd;
     background: #f8fafd;
     border-color: #dee6f2;
 }
 QPushButton[role="primary"] {
+    min-height: 34px;
+    max-height: 34px;
     background: #2f66e8;
     border: 1px solid #2f66e8;
     color: #ffffff;
@@ -221,116 +228,261 @@ QPushButton[role="primary"]:hover {
     border-color: #285bd3;
 }
 QPushButton[role="secondary"] {
+    min-height: 30px;
+    max-height: 30px;
     background: #ffffff;
     border: 1px solid #d5deeb;
     color: #4e6483;
     font-weight: 600;
 }
 QPushButton[role="ghost"] {
-    background: #ffffff;
-    border: 1px solid #d6e0ef;
-    color: #4f6687;
-}
-QPushButton#settingsButton {
-    font-weight: 700;
-}
-QPushButton[role="icon"] {
-    min-width: 30px;
-    max-width: 30px;
     min-height: 30px;
     max-height: 30px;
-    padding: 0;
-    font-size: 11px;
-}
-QPushButton[role="mode"] {
     background: #ffffff;
-    border: 1px solid #d5deea;
-    color: #415978;
-    min-width: 96px;
+    border: 1px solid #d6e0ef;
+    color: #263a57;
 }
-QPushButton[role="mode"]:hover {
-    background: #f8fafd;
-}
-QPushButton[role="mode"]:checked {
-    background: #f0f5ff;
-    border: 1px solid #2f66e8;
-    color: #2f66e8;
+QPushButton#settingsButton {
+    min-height: 42px;
+    max-height: 42px;
+    background: #ffffff;
+    border: 1px solid #e3e9f2;
+    border-radius: 12px;
+    color: #1a304d;
+    font-size: 13px;
     font-weight: 700;
 }
-QListWidget {
-    border: none;
-    background: transparent;
+QPushButton#settingsButton:hover {
+    background: #f8fafc;
 }
-QListWidget::item {
-    border-bottom: 1px solid #eef2f8;
-    padding: 8px 2px;
+QPushButton#startButton {
+    min-height: 44px;
+    max-height: 44px;
+    font-size: 14px;
+    border-radius: 8px;
+}
+QPushButton[role="icon"] {
+    min-width: 34px;
+    max-width: 34px;
+    min-height: 34px;
+    max-height: 34px;
+    padding: 0;
+}
+QPushButton[role="mode"] {
+    min-height: 36px;
+    max-height: 36px;
+    background: #f8fafc;
+    border: 1px solid #d5deea;
+    color: #233752;
+    min-width: 104px;
+    padding: 0 8px;
+    font-weight: 600;
+}
+QPushButton[role="mode"]:hover {
+    background: #f2f6ff;
+}
+QPushButton[role="mode"]:checked {
+    background: #2f66e8;
+    border: 1px solid #2f66e8;
+    color: #ffffff;
+    font-weight: 700;
 }
 """
 
 
-class CountSelector(QWidget):
-    valueChanged = pyqtSignal(int)
+def _draw_icon_pixmap(name, color=ICON_BLUE, size=18, line_width=2):
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
 
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    scale = size / 24
+
+    def p(x, y):
+        return QPointF(x * scale, y * scale)
+
+    def r(x, y, w, h):
+        return QRectF(x * scale, y * scale, w * scale, h * scale)
+
+    pen = QPen(QColor(color), max(1, int(line_width * scale)))
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+
+    if name == "device":
+        painter.drawRoundedRect(r(5, 9, 14, 10), 2 * scale, 2 * scale)
+        painter.drawLine(p(8, 9), p(8, 6))
+        painter.drawArc(r(8, 3, 8, 8), 0, 180 * 16)
+        painter.drawEllipse(r(11, 6, 2, 2))
+    elif name == "chart":
+        painter.drawRoundedRect(r(4, 4, 16, 16), 2 * scale, 2 * scale)
+        painter.drawPolyline(QPolygonF([p(7, 15), p(10, 11), p(13, 13), p(17, 8)]))
+        painter.drawLine(p(7, 17), p(17, 17))
+    elif name == "file":
+        painter.drawRoundedRect(r(6, 3, 12, 18), 1.5 * scale, 1.5 * scale)
+        painter.drawLine(p(14, 3), p(18, 7))
+        painter.drawLine(p(14, 3), p(14, 7))
+        painter.drawLine(p(14, 7), p(18, 7))
+        painter.drawLine(p(9, 11), p(15, 11))
+        painter.drawLine(p(9, 15), p(15, 15))
+    elif name == "trophy":
+        painter.drawRoundedRect(r(8, 4, 8, 9), 2 * scale, 2 * scale)
+        painter.drawArc(r(4, 6, 6, 6), 90 * 16, 160 * 16)
+        painter.drawArc(r(14, 6, 6, 6), -70 * 16, 160 * 16)
+        painter.drawLine(p(12, 13), p(12, 17))
+        painter.drawLine(p(9, 20), p(15, 20))
+        painter.drawLine(p(10, 17), p(14, 17))
+    elif name == "link":
+        painter.drawArc(r(4, 8, 9, 8), 45 * 16, 270 * 16)
+        painter.drawArc(r(11, 8, 9, 8), -135 * 16, 270 * 16)
+        painter.drawLine(p(9, 14), p(15, 10))
+    elif name == "refresh":
+        painter.drawArc(r(5, 5, 14, 14), 40 * 16, 270 * 16)
+        painter.drawLine(p(17, 5), p(19, 5))
+        painter.drawLine(p(19, 5), p(19, 8))
+        painter.drawArc(r(5, 5, 14, 14), 220 * 16, 120 * 16)
+    elif name == "target":
+        painter.drawEllipse(r(6, 6, 12, 12))
+        painter.drawEllipse(r(10, 10, 4, 4))
+        painter.drawLine(p(12, 3), p(12, 7))
+        painter.drawLine(p(12, 17), p(12, 21))
+        painter.drawLine(p(3, 12), p(7, 12))
+        painter.drawLine(p(17, 12), p(21, 12))
+    elif name == "cube":
+        painter.drawPolygon(QPolygonF([p(12, 4), p(19, 8), p(12, 12), p(5, 8)]))
+        painter.drawPolygon(QPolygonF([p(5, 8), p(12, 12), p(12, 20), p(5, 16)]))
+        painter.drawPolygon(QPolygonF([p(19, 8), p(12, 12), p(12, 20), p(19, 16)]))
+    elif name == "info":
+        painter.drawEllipse(r(4, 4, 16, 16))
+        painter.drawLine(p(12, 11), p(12, 16))
+        painter.drawPoint(p(12, 8))
+    elif name == "gear":
+        painter.drawEllipse(r(8, 8, 8, 8))
+        for start, end in (
+            ((12, 3), (12, 6)),
+            ((12, 18), (12, 21)),
+            ((3, 12), (6, 12)),
+            ((18, 12), (21, 12)),
+            ((5, 5), (7, 7)),
+            ((17, 17), (19, 19)),
+            ((5, 19), (7, 17)),
+            ((17, 7), (19, 5)),
+        ):
+            painter.drawLine(p(*start), p(*end))
+    elif name == "trash":
+        painter.drawLine(p(8, 7), p(16, 7))
+        painter.drawLine(p(10, 4), p(14, 4))
+        painter.drawRoundedRect(r(7, 7, 10, 13), 1.5 * scale, 1.5 * scale)
+        painter.drawLine(p(10, 10), p(10, 17))
+        painter.drawLine(p(14, 10), p(14, 17))
+    elif name == "send":
+        painter.drawPolygon(QPolygonF([p(4, 12), p(20, 5), p(13, 20), p(11, 13)]))
+        painter.drawLine(p(11, 13), p(20, 5))
+    elif name == "play":
+        painter.setBrush(QColor(color))
+        painter.drawPolygon(QPolygonF([p(9, 6), p(18, 12), p(9, 18)]))
+    elif name == "grid":
+        for x in (5, 14):
+            for y in (5, 14):
+                painter.drawRoundedRect(r(x, y, 5, 5), 1.2 * scale, 1.2 * scale)
+    elif name == "pulse":
+        painter.drawPolyline(QPolygonF([p(3, 12), p(8, 12), p(10, 7), p(14, 17), p(16, 12), p(21, 12)]))
+    else:
+        painter.drawEllipse(r(6, 6, 12, 12))
+
+    painter.end()
+    return pixmap
+
+
+def _make_icon(name, color=ICON_BLUE, size=18):
+    return QIcon(_draw_icon_pixmap(name, color, size))
+
+
+def _make_checkable_icon(name, normal_color=ICON_BLUE, checked_color="#ffffff", size=18):
+    icon = QIcon()
+    icon.addPixmap(_draw_icon_pixmap(name, normal_color, size), QIcon.Normal, QIcon.Off)
+    icon.addPixmap(_draw_icon_pixmap(name, checked_color, size), QIcon.Normal, QIcon.On)
+    return icon
+
+
+def _make_icon_label(name, size=20, color=ICON_BLUE):
+    label = QLabel()
+    label.setFixedSize(size, size)
+    label.setAlignment(Qt.AlignCenter)
+    label.setPixmap(_draw_icon_pixmap(name, color, size))
+    return label
+
+
+class EmptyResultIllustration(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName("countSelector")
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        self.setFixedSize(190, 150)
 
-        self.btn_minus = QPushButton("－")
-        self.btn_minus.setCursor(Qt.PointingHandCursor)
-        self.btn_minus.setProperty("role", "spin_left")
-        self.btn_minus.clicked.connect(self._on_minus)
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
 
-        self.label = QLabel("3")
-        self.label.setObjectName("spinLabel")
-        self.label.setAlignment(Qt.AlignCenter)
+        painter.setBrush(QColor("#dfe9ff"))
+        painter.drawEllipse(QRectF(22, 122, 146, 18))
 
-        self.btn_plus = QPushButton("＋")
-        self.btn_plus.setCursor(Qt.PointingHandCursor)
-        self.btn_plus.setProperty("role", "spin_right")
-        self.btn_plus.clicked.connect(self._on_plus)
+        painter.setBrush(QColor("#e8effc"))
+        painter.drawRoundedRect(QRectF(54, 62, 86, 62), 8, 8)
 
-        layout.addWidget(self.btn_minus)
-        layout.addWidget(self.label, 1)
-        layout.addWidget(self.btn_plus)
+        painter.setBrush(QColor("#afc2e4"))
+        painter.drawPolygon(
+            QPolygonF(
+                [
+                    QPointF(46, 58),
+                    QPointF(148, 58),
+                    QPointF(158, 82),
+                    QPointF(36, 82),
+                ]
+            )
+        )
 
-        self._min = 1
-        self._max = 20
-        self._val = 3
+        painter.setBrush(QColor("#cfdcf3"))
+        painter.drawPolygon(
+            QPolygonF(
+                [
+                    QPointF(62, 58),
+                    QPointF(94, 58),
+                    QPointF(84, 92),
+                    QPointF(48, 82),
+                ]
+            )
+        )
+        painter.drawPolygon(
+            QPolygonF(
+                [
+                    QPointF(100, 58),
+                    QPointF(138, 58),
+                    QPointF(154, 82),
+                    QPointF(112, 92),
+                ]
+            )
+        )
 
-    def setRange(self, minimum, maximum):
-        self._min = minimum
-        self._max = maximum
-        self._update_ui()
+        painter.setBrush(QColor("#c9d7ef"))
+        painter.drawEllipse(QRectF(78, 32, 34, 34))
+        painter.setBrush(QColor("#dce6fa"))
+        painter.drawEllipse(QRectF(106, 52, 34, 34))
+        painter.setBrush(QColor("#c0cde3"))
+        painter.drawEllipse(QRectF(95, 74, 38, 38))
 
-    def value(self):
-        return self._val
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawRoundedRect(QRectF(80, 96, 56, 34), 12, 12)
 
-    def setValue(self, v):
-        self._val = max(self._min, min(self._max, v))
-        self._update_ui()
-        self.valueChanged.emit(self._val)
+        painter.setBrush(QColor("#bdd0f3"))
+        for x, y, radius in ((24, 48, 6), (64, 18, 4), (150, 30, 4), (112, 8, 3)):
+            painter.drawEllipse(QRectF(x, y, radius * 2, radius * 2))
 
-    def setFixedWidth(self, width):
-        super().setFixedWidth(width)
-
-    def setAlignment(self, align):
-        self.label.setAlignment(align)
-
-    def _on_minus(self):
-        if self._val > self._min:
-            self.setValue(self._val - 1)
-
-    def _on_plus(self):
-        if self._val < self._max:
-            self.setValue(self._val + 1)
-
-    def _update_ui(self):
-        self.label.setText(str(self._val))
-        self.btn_minus.setEnabled(self._val > self._min)
-        self.btn_plus.setEnabled(self._val < self._max)
+        painter.setPen(QPen(QColor("#b8c9ec"), 3))
+        painter.drawLine(QPointF(148, 50), QPointF(170, 30))
+        painter.drawLine(QPointF(160, 38), QPointF(166, 44))
+        painter.drawLine(QPointF(162, 34), QPointF(176, 22))
 
 
 class NativeMessageDialog(QDialog):
@@ -395,8 +547,8 @@ class SerialAssistant(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("塑料光谱识别工作台")
-        self.resize(1280, 740)
+        self.setWindowTitle("光纤光谱识别工作台")
+        self.resize(1400, 760)
         self.setMinimumSize(1120, 660)
         self.setStyleSheet(LIGHT_STYLESHEET)
 
@@ -406,7 +558,6 @@ class SerialAssistant(QMainWindow):
         self.data_dir = APP_ROOT / "data"
         self.model_path = APP_ROOT / "classifier.pkl"
         self.pending_scan_values = {}
-        self.train_group_scans = []
         self.saved_group_count = 0
         self.predict_scan_active = False
         self.serial_port = None
@@ -430,6 +581,7 @@ class SerialAssistant(QMainWindow):
         self._apply_mode(self.MODE_PREDICT)
         self._load_classifier(silent=True)
         self._append_log("系统初始化完成，等待连接设备。")
+        self._append_log("请输入指令或点击“开始识别”进行采集。")
 
     def _build_ui(self):
         surface = QFrame()
@@ -437,36 +589,31 @@ class SerialAssistant(QMainWindow):
         self.setCentralWidget(surface)
 
         root_layout = QVBoxLayout(surface)
-        root_layout.setContentsMargins(10, 8, 10, 10)
-        root_layout.setSpacing(8)
+        root_layout.setContentsMargins(16, 14, 16, 16)
+        root_layout.setSpacing(12)
 
-        # 顶部自定义栏过高时会和系统标题栏形成视觉重复，默认隐藏。
-        # 后续如需恢复可取消下一行注释并调用 _build_top_bar()。
-        # root_layout.addWidget(self._build_top_bar())
-
-        # 让左侧面板能够拉伸，背景卡片才不会悬空
         content_layout = QHBoxLayout()
-        content_layout.setSpacing(10)
+        content_layout.setSpacing(12)
         content_layout.addWidget(self._build_left_panel())
         content_layout.addWidget(self._build_center_panel(), 1)
         content_layout.addWidget(self._build_right_panel())
-        content_layout.setStretch(0, 30)
-        content_layout.setStretch(1, 50)
+        content_layout.setStretch(0, 24)
+        content_layout.setStretch(1, 56)
         content_layout.setStretch(2, 20)
         root_layout.addLayout(content_layout, 1)
 
     def _build_top_bar(self):
         card = QFrame()
         card.setObjectName("topBar")
-        card.setFixedHeight(24)
+        card.setFixedHeight(40)
         layout = QHBoxLayout(card)
-        layout.setContentsMargins(2, 0, 2, 0)
-        layout.setSpacing(6)
+        layout.setContentsMargins(8, 0, 8, 0)
+        layout.setSpacing(10)
 
-        logo = self._create_logo_label(14)
+        logo = self._create_logo_label(24)
         layout.addWidget(logo)
 
-        title = QLabel("塑料光谱识别工作台")
+        title = QLabel("光纤光谱识别工作台")
         title.setObjectName("windowTitle")
         layout.addWidget(title)
         layout.addStretch(1)
@@ -474,22 +621,24 @@ class SerialAssistant(QMainWindow):
 
     def _build_left_panel(self):
         panel = QWidget()
-        panel.setFixedWidth(348)
+        panel.setFixedWidth(286)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
-        device_card, device_layout = self._create_card("设备连接", "选择串口并连接设备", padding=14, spacing=9)
+        device_card, device_layout = self._create_card("设备连接", "选择串口并连接设备", padding=18, spacing=5, icon_name="device")
 
         port_row = QHBoxLayout()
         port_row.setContentsMargins(0, 0, 0, 0)
-        port_row.setSpacing(SPACING_8)
+        port_row.setSpacing(6)
         self.port_combo = QComboBox()
         self.port_combo.setMinimumContentsLength(8)
         self.port_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         port_row.addWidget(self.port_combo, 1)
-        self.refresh_button = QPushButton("⟳")
+        self.refresh_button = QPushButton()
         self.refresh_button.setProperty("role", "icon")
+        self.refresh_button.setIcon(_make_icon("refresh"))
+        self.refresh_button.setIconSize(QSize(17, 17))
         self.refresh_button.setToolTip("刷新串口")
         self.refresh_button.clicked.connect(self.refresh_ports)
         port_row.addWidget(self.refresh_button)
@@ -525,20 +674,27 @@ class SerialAssistant(QMainWindow):
 
         self.connect_button = QPushButton("连接设备")
         self.connect_button.setProperty("role", "primary")
+        self.connect_button.setIcon(_make_icon("link", "#ffffff"))
+        self.connect_button.setIconSize(QSize(17, 17))
         self.connect_button.clicked.connect(self._toggle_connection_state)
+        device_layout.addStretch(1)
         device_layout.addWidget(self.connect_button)
 
-        layout.addWidget(device_card)
+        layout.addWidget(device_card, 1)
 
-        collect_card, collect_layout = self._create_card("采集设置", "选择识别模式并设置采集次数", padding=14, spacing=9)
+        collect_card, collect_layout = self._create_card("采集设置", "选择识别与训练模式", padding=18, spacing=10, icon_name="gear")
         mode_row = QHBoxLayout()
         mode_row.setSpacing(6)
         self.predict_mode_button = QPushButton("识别模式")
         self.predict_mode_button.setProperty("role", "mode")
         self.predict_mode_button.setCheckable(True)
+        self.predict_mode_button.setIcon(_make_checkable_icon("target"))
+        self.predict_mode_button.setIconSize(QSize(15, 15))
         self.train_mode_button = QPushButton("训练模式")
         self.train_mode_button.setProperty("role", "mode")
         self.train_mode_button.setCheckable(True)
+        self.train_mode_button.setIcon(_make_checkable_icon("cube"))
+        self.train_mode_button.setIconSize(QSize(15, 15))
 
         mode_group = QButtonGroup(self)
         mode_group.addButton(self.predict_mode_button)
@@ -547,35 +703,27 @@ class SerialAssistant(QMainWindow):
 
         self.predict_mode_button.clicked.connect(lambda: self._apply_mode(self.MODE_PREDICT))
         self.train_mode_button.clicked.connect(lambda: self._apply_mode(self.MODE_TRAIN))
-        mode_row.addWidget(self.predict_mode_button)
-        mode_row.addWidget(self.train_mode_button)
+        mode_row.addWidget(self.predict_mode_button, 1)
+        mode_row.addWidget(self.train_mode_button, 1)
         collect_layout.addLayout(mode_row)
 
-        spin_row = QHBoxLayout()
-        spin_row.setContentsMargins(0, 0, 0, 0)
-        spin_row.setSpacing(SPACING_8)
-        spin_row.addWidget(self._field_label("采集次数"))
-        spin_row.addStretch(1)
-        self.sample_count_spin = CountSelector()
-        self.sample_count_spin.setRange(1, 20)
-        self.sample_count_spin.setValue(3)
-        self.sample_count_spin.setFixedWidth(157)
-        self.sample_count_spin.setAlignment(Qt.AlignCenter)
-        self.sample_count_spin.valueChanged.connect(self._update_progress_text)
-        spin_row.addWidget(self.sample_count_spin)
-        collect_layout.addLayout(spin_row)
-
-        tip = QLabel("建议 3-5 次，结果更稳定")
+        tip_row = QHBoxLayout()
+        tip_row.setContentsMargins(0, 6, 0, 0)
+        tip_row.setSpacing(6)
+        tip_row.addWidget(_make_icon_label("info", 16))
+        tip = QLabel("每个样品采集一次完整光谱光源")
         tip.setObjectName("hintText")
-        collect_layout.addWidget(tip)
-        layout.addWidget(collect_card)
+        tip_row.addWidget(tip)
+        tip_row.addStretch(1)
+        collect_layout.addLayout(tip_row)
 
-        # 避免窗口变高时在“系统设置”上方产生过大留白
-        layout.addSpacing(8)
+        layout.addWidget(collect_card)
 
         self.settings_button = QPushButton("系统设置")
         self.settings_button.setObjectName("settingsButton")
         self.settings_button.setProperty("role", "ghost")
+        self.settings_button.setIcon(_make_icon("gear", "#263a57"))
+        self.settings_button.setIconSize(QSize(17, 17))
         self.settings_button.clicked.connect(self._show_settings_dialog)
         layout.addWidget(self.settings_button)
 
@@ -666,34 +814,34 @@ class SerialAssistant(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        top_card, top_layout = self._create_card(padding=12, spacing=8)
-        top_card.setFixedHeight(154)
+        top_card, top_layout = self._create_card(padding=18, spacing=10)
+        top_card.setFixedHeight(168)
 
         status_grid = QGridLayout()
         status_grid.setHorizontalSpacing(8)
         status_grid.setVerticalSpacing(12)
 
         head_text = QVBoxLayout()
-        head_text.setSpacing(1)
-        head_title = QLabel("光谱采集与识别")
-        head_title.setObjectName("sectionTitle")
-        head_subtitle = QLabel("采集样本光谱并进行识别分析")
+        head_text.setSpacing(5)
+        head_subtitle = QLabel("采集光纤光谱并进行识别分析")
         head_subtitle.setObjectName("subtitle")
-        head_text.addWidget(head_title)
+        head_text.addLayout(self._section_title_row("光谱采集与识别", "chart"))
         head_text.addWidget(head_subtitle)
-        head_text.addStretch(1) # Push texts to the top if needed
         status_grid.addLayout(head_text, 0, 0, 1, 2)
 
-        self.start_button = QPushButton("开始采集")
+        self.start_button = QPushButton("开始识别")
+        self.start_button.setObjectName("startButton")
         self.start_button.setProperty("role", "primary")
-        self.start_button.setSizePolicy(self.start_button.sizePolicy().Expanding, self.start_button.sizePolicy().Fixed)
+        self.start_button.setMinimumWidth(176)
+        self.start_button.setIcon(_make_icon("play", "#ffffff"))
+        self.start_button.setIconSize(QSize(18, 18))
         self.start_button.clicked.connect(self._handle_start_button_clicked)
         
-        status_grid.addWidget(self.start_button, 0, 2, 1, 1, alignment=Qt.AlignBottom)
+        status_grid.addWidget(self.start_button, 0, 2, 1, 1, alignment=Qt.AlignVCenter | Qt.AlignRight)
 
-        self.connection_metric_value, self.connection_metric_dot = self._create_metric_card("连接状态", "离线", True)
-        self.mode_metric_value, _ = self._create_metric_card("模式", "识别模式")
-        self.progress_metric_value, _ = self._create_metric_card("采集进度", "0 / 3")
+        self.connection_metric_value, self.connection_metric_dot = self._create_metric_card("连接状态", "离线", True, "link")
+        self.mode_metric_value, _ = self._create_metric_card("模式", "识别模式", False, "grid")
+        self.progress_metric_value, _ = self._create_metric_card("采集状态", "待采集", False, "pulse")
 
         status_grid.addWidget(self._metric_card_holder(self.connection_metric_value, self.connection_metric_dot), 1, 0)
         status_grid.addWidget(self._metric_card_holder(self.mode_metric_value), 1, 1)
@@ -706,15 +854,15 @@ class SerialAssistant(QMainWindow):
         top_layout.addLayout(status_grid)
         layout.addWidget(top_card, 0) # Fixed height portion
 
-        log_card, log_layout = self._create_card(padding=10, spacing=8)
+        log_card, log_layout = self._create_card(padding=16, spacing=12)
         log_head = QHBoxLayout()
         log_head.setSpacing(SPACING_8)
-        log_title = QLabel("实时日志")
-        log_title.setObjectName("sectionTitle")
-        log_head.addWidget(log_title)
+        log_head.addLayout(self._section_title_row("实时日志", "file"))
         log_head.addStretch(1)
         clear_button = QPushButton("清空日志")
         clear_button.setProperty("role", "secondary")
+        clear_button.setIcon(_make_icon("trash", "#4e6483"))
+        clear_button.setIconSize(QSize(16, 16))
         clear_button.clicked.connect(self._clear_logs)
         log_head.addWidget(clear_button)
         log_layout.addLayout(log_head)
@@ -735,6 +883,9 @@ class SerialAssistant(QMainWindow):
         self.command_input.setPlaceholderText("输入自定义串口指令")
         self.send_button = QPushButton("发送指令")
         self.send_button.setProperty("role", "primary")
+        self.send_button.setIcon(_make_icon("send", "#ffffff"))
+        self.send_button.setIconSize(QSize(18, 18))
+        self.send_button.setMinimumWidth(126)
         self.send_button.clicked.connect(self._send_command)
         cmd_row.addWidget(self.command_input, 1)
         cmd_row.addWidget(self.send_button)
@@ -745,42 +896,41 @@ class SerialAssistant(QMainWindow):
 
     def _build_right_panel(self):
         panel = QWidget()
-        panel.setFixedWidth(252)
+        panel.setFixedWidth(300)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+        layout.setSpacing(12)
 
-        result_card, result_layout = self._create_card("识别结果", padding=10, spacing=8)
-        result_card.setFixedHeight(154) # 强制与左侧的光谱采集记录卡片高度对齐
+        result_card, result_layout = self._create_card("识别结果", padding=18, spacing=12, icon_name="trophy")
+        result_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-        result_layout.addStretch(1) # Push to center
+        result_layout.addStretch(2)
+        result_layout.addWidget(EmptyResultIllustration(), 0, Qt.AlignCenter)
 
         self.result_name_label = QLabel("暂无结果")
         self.result_name_label.setObjectName("resultName")
-        font = self.result_name_label.font()
-        font.setPointSize(24)
-        font.setBold(True)
-        self.result_name_label.setFont(font)
         self.result_name_label.setAlignment(Qt.AlignCenter)
-        
-        self.result_name_label.setStyleSheet("color: #2f66e8;") # 采用醒目的主色调
         result_layout.addWidget(self.result_name_label)
-        result_layout.addStretch(1) # Push to center
-        
-        layout.addWidget(result_card)
 
-        history_card, history_layout = self._create_card("最近记录", "最多保留最近 20 条记录", padding=10, spacing=8)
-        self.history_stack = QStackedWidget()
-        history_empty = self._create_empty_widget("暂无记录", None, "⌁")
-        self.history_stack.addWidget(history_empty)
+        self.result_hint_label = QLabel("请连接设备并开始识别以获取结果")
+        self.result_hint_label.setObjectName("resultHint")
+        self.result_hint_label.setAlignment(Qt.AlignCenter)
+        result_layout.addWidget(self.result_hint_label)
 
-        self.history_list = QListWidget()
-        self.history_stack.addWidget(self.history_list)
-        self.history_stack.setCurrentIndex(0)
-        history_layout.addWidget(self.history_stack, 1)
-        layout.addWidget(history_card, 1)
-        # layout.addStretch(1) 移除可能导致变形的占位
+        result_layout.addSpacing(28)
+        result_layout.addWidget(self._create_divider())
+        result_layout.addSpacing(6)
 
+        info_title = QLabel("结果信息")
+        info_title.setObjectName("metricTitle")
+        result_layout.addWidget(info_title)
+        self.result_category_value = self._create_value_row(result_layout, "识别类别", "--")
+        self.result_range_value = self._create_value_row(result_layout, "波长范围", WAVELENGTH_RANGE_TEXT)
+        self.result_time_value = self._create_value_row(result_layout, "采集时间", "--")
+        self.result_note_value = self._create_value_row(result_layout, "备注信息", "--")
+        result_layout.addStretch(1)
+
+        layout.addWidget(result_card, 1)
         return panel
 
     def _create_logo_label(self, size):
@@ -799,23 +949,33 @@ class SerialAssistant(QMainWindow):
         logo.setFont(font)
         return logo
 
-    def _create_card(self, title=None, subtitle=None, padding=SPACING_16, spacing=SPACING_12):
+    def _create_card(self, title=None, subtitle=None, padding=SPACING_16, spacing=SPACING_12, icon_name=None):
         card = QFrame()
         card.setObjectName("card")
         layout = QVBoxLayout(card)
         layout.setContentsMargins(padding, padding, padding, padding)
         layout.setSpacing(spacing)
         if title:
-            title_label = QLabel(title)
-            title_label.setObjectName("sectionTitle")
-            layout.addWidget(title_label)
+            layout.addLayout(self._section_title_row(title, icon_name))
         if subtitle:
             subtitle_label = QLabel(subtitle)
             subtitle_label.setObjectName("subtitle")
             layout.addWidget(subtitle_label)
         return card, layout
 
-    def _create_metric_card(self, title, value, with_dot=False):
+    def _section_title_row(self, title, icon_name=None):
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        if icon_name:
+            row.addWidget(_make_icon_label(icon_name, 22))
+        title_label = QLabel(title)
+        title_label.setObjectName("sectionTitle")
+        row.addWidget(title_label)
+        row.addStretch(1)
+        return row
+
+    def _create_metric_card(self, title, value, with_dot=False, icon_name=None):
         value_label = QLabel(value)
         value_label.setObjectName("metricValue")
         dot_label = None
@@ -824,18 +984,26 @@ class SerialAssistant(QMainWindow):
             dot_label.setObjectName("statusDotMini")
             dot_label.setProperty("status", "offline")
         value_label.metric_title = title
+        value_label.metric_icon_name = icon_name
         return value_label, dot_label
 
     def _metric_card_holder(self, value_label, dot_label=None):
         card = QFrame()
         card.setObjectName("metricCard")
-        card.setMinimumHeight(62)
+        card.setMinimumHeight(76)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(3)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(8)
+        if value_label.metric_icon_name:
+            title_row.addWidget(_make_icon_label(value_label.metric_icon_name, 16))
         title = QLabel(value_label.metric_title)
         title.setObjectName("metricTitle")
-        layout.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch(1)
+        layout.addLayout(title_row)
         if dot_label:
             row = QHBoxLayout()
             row.setSpacing(8)
@@ -887,7 +1055,7 @@ class SerialAssistant(QMainWindow):
         block = QWidget()
         block_layout = QVBoxLayout(block)
         block_layout.setContentsMargins(0, 0, 0, 0)
-        block_layout.setSpacing(4)
+        block_layout.setSpacing(2)
         block_layout.addWidget(self._field_label(label_text))
         if isinstance(control, QHBoxLayout):
             block_layout.addLayout(control)
@@ -898,12 +1066,13 @@ class SerialAssistant(QMainWindow):
     def _create_value_row(self, parent_layout, name, value):
         row = QWidget()
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(12, 8, 12, 8)
+        row_layout.setContentsMargins(10, 5, 4, 5)
         row_layout.setSpacing(8)
         title = QLabel(name)
-        title.setObjectName("valueLabelTitle")
+        title.setObjectName("mutedText")
         value_label = QLabel(value)
         value_label.setObjectName("fieldLabel")
+        value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         row_layout.addWidget(title)
         row_layout.addStretch(1)
         row_layout.addWidget(value_label)
@@ -922,22 +1091,21 @@ class SerialAssistant(QMainWindow):
 
     def refresh_ports(self):
         previous = self.port_combo.currentData() or self.port_combo.currentText()
-        ports = sorted(list_ports.comports(), key=lambda item: item.device)
+        ports = _list_available_serial_ports()
         self.port_combo.blockSignals(True)
         self.port_combo.clear()
         if not ports:
             self.port_combo.addItem("无可用串口")
         else:
             selected_index = 0
-            for index, port in enumerate(ports):
-                label = f"{port.device} - {port.description}"
-                self.port_combo.addItem(label, port.device)
-                if previous and previous == port.device:
+            for index, (port_name, label) in enumerate(ports):
+                self.port_combo.addItem(label, port_name)
+                if previous and previous == port_name:
                     selected_index = index
             self.port_combo.setCurrentIndex(selected_index)
         self.port_combo.blockSignals(False)
         if not self.connected:
-            self._append_log(f"串口列表已刷新，共 {len(ports)} 个可用端口。")
+            self._append_log(f"串口初始化完成，共 {len(ports)} 个可用端口。")
 
     def _toggle_connection_state(self):
         if self.connected:
@@ -980,18 +1148,41 @@ class SerialAssistant(QMainWindow):
         self.train_mode_button.setChecked(mode_text == self.MODE_TRAIN)
         self.mode_metric_value.setText(mode_text)
         self.start_button.setText("开始识别" if mode_text == self.MODE_PREDICT else "开始采集")
-        self.result_name_label.setText("暂无结果")
+        self._set_result_state("暂无结果", "请连接设备并开始识别以获取结果")
         self._append_log(f"切换到{mode_text}。")
         self._update_progress_text()
 
+    def _set_result_state(
+        self,
+        name,
+        hint=None,
+        category="--",
+        wavelength_range=WAVELENGTH_RANGE_TEXT,
+        collected_at="--",
+        note="--",
+    ):
+        self.result_name_label.setText(name)
+        self.result_hint_label.setText(hint or "请连接设备并开始识别以获取结果")
+        self.result_category_value.setText(category)
+        self.result_range_value.setText(wavelength_range)
+        self.result_time_value.setText(collected_at)
+        self.result_note_value.setText(note)
+
     def _update_progress_text(self):
-        if self.current_mode == self.MODE_TRAIN:
-            current = len(self.train_group_scans)
-            target = self.sample_count_spin.value()
+        if self.collecting:
+            status_text = "采集中"
+        elif self.predict_scan_active:
+            status_text = "识别中"
+        elif self.result_name_label.text() == "等待标注":
+            status_text = "待标注"
+        elif self.result_name_label.text() not in ("暂无结果", "识别中", "采集中"):
+            status_text = "已完成"
         else:
-            current = 0 if self.predict_scan_active else 1 if self.result_name_label.text() not in ("暂无结果", "识别中") else 0
-            target = 1
-        self.progress_metric_value.setText(f"{current} / {target}")
+            status_text = "待采集"
+        self.progress_metric_value.setText(status_text)
+        self.progress_metric_value.setProperty("accent", "warning" if status_text == "待采集" else "")
+        self.progress_metric_value.style().unpolish(self.progress_metric_value)
+        self.progress_metric_value.style().polish(self.progress_metric_value)
 
     def _send_command(self):
         text = self.command_input.text().strip()
@@ -1019,12 +1210,9 @@ class SerialAssistant(QMainWindow):
     def _append_log(self, message):
         if self.log_stack.currentIndex() == 0:
             self.log_stack.setCurrentIndex(1)
-        self.log_text.append(message)
-        if self.history_stack.currentIndex() == 0:
-            self.history_stack.setCurrentIndex(1)
-        self.history_list.insertItem(0, QListWidgetItem(message))
-        while self.history_list.count() > 20:
-            self.history_list.takeItem(self.history_list.count() - 1)
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        safe_message = escape(str(message))
+        self.log_text.append(f'<span style="color:{ICON_BLUE};">[{timestamp}]</span>&nbsp;&nbsp;{safe_message}')
 
     def _exec_native_dialog(self, dialog):
         app = QApplication.instance()
@@ -1058,18 +1246,17 @@ class SerialAssistant(QMainWindow):
 
     def _handle_train_collect_action(self):
         if self.collecting:
-            self._append_log("当前组正在采集中，请等待收满目标次数的完整扫描。")
+            self._append_log("当前样品正在采集中，请等待完整扫描返回。")
             return
 
         self._reset_train_collection_state()
         self.collecting = True
-        self.sample_count_spin.setEnabled(False)
         self.start_button.setText("采集中...")
-        self.result_name_label.setText("采集中")
+        self._set_result_state("采集中", "正在等待完整光谱返回", note="训练采集")
+        self._update_progress_text()
         train_path = self._ensure_train_data_file()
         self._append_log(
-            f"{self.MODE_TRAIN}开始采集，目标 {self.sample_count_spin.value()} 次完整扫描。"
-            f" 数据将追加到：{train_path}"
+            f"{self.MODE_TRAIN}开始采集，本次样品测量一次。数据将追加到：{train_path}"
         )
         if not self._request_scan():
             self._reset_train_collection_state()
@@ -1112,11 +1299,11 @@ class SerialAssistant(QMainWindow):
             self.pending_scan_values.clear()
             self._handle_complete_scan(scan_values)
 
-    def _append_train_row(self, avg_values, label):
+    def _append_train_row(self, scan_values, label):
         train_path = self._ensure_train_data_file()
         with train_path.open("a", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
-            writer.writerow([*(f"{value:.4f}" for value in avg_values), label])
+            writer.writerow([*(f"{value:.4f}" for value in scan_values), label])
 
     def _ensure_train_data_file(self):
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -1129,9 +1316,7 @@ class SerialAssistant(QMainWindow):
     def _reset_train_collection_state(self):
         self.collecting = False
         self.pending_scan_values.clear()
-        self.train_group_scans.clear()
         self._clear_scan_timeout()
-        self.sample_count_spin.setEnabled(True)
         self.start_button.setText("开始识别" if self.current_mode == self.MODE_PREDICT else "开始采集")
         self._update_progress_text()
 
@@ -1149,19 +1334,19 @@ class SerialAssistant(QMainWindow):
 
         self.predict_scan_active = True
         self.pending_scan_values.clear()
-        self.result_name_label.setText("识别中")
+        self._set_result_state("识别中", "正在等待完整光谱返回", note="识别采集")
         self._update_progress_text()
         self._append_log(f"{self.MODE_PREDICT}开始采集。")
         if not self._request_scan():
             self.predict_scan_active = False
-            self.result_name_label.setText("暂无结果")
+            self._set_result_state("暂无结果", "请连接设备并开始识别以获取结果")
             self._update_progress_text()
 
     def _handle_predict_scan_complete(self, scan_values):
         classifier = self._load_classifier()
         if classifier is None:
             self.predict_scan_active = False
-            self.result_name_label.setText("模型错误")
+            self._set_result_state("模型错误", "请检查模型文件路径", note="模型不可用")
             self._update_progress_text()
             return
 
@@ -1170,7 +1355,7 @@ class SerialAssistant(QMainWindow):
             label = get_prediction_label(predicted)
         except Exception as exc:
             self.predict_scan_active = False
-            self.result_name_label.setText("预测失败")
+            self._set_result_state("预测失败", "模型预测过程出现异常", note="预测失败")
             self._show_native_message(QMessageBox.Critical, "预测失败", f"执行模型预测失败：{exc}")
             self._append_log(f"执行模型预测失败：{exc}")
             self._update_progress_text()
@@ -1178,7 +1363,13 @@ class SerialAssistant(QMainWindow):
 
         self.predict_scan_active = False
         self._clear_scan_timeout()
-        self.result_name_label.setText(str(label))
+        self._set_result_state(
+            str(label),
+            "识别完成",
+            category=str(label),
+            collected_at=datetime.now().strftime("%H:%M:%S"),
+            note="模型预测",
+        )
         self._append_log(f"识别结果：{label}，光谱：{self._format_scan_values(scan_values)}")
         self._update_progress_text()
 
@@ -1196,7 +1387,7 @@ class SerialAssistant(QMainWindow):
             return False
 
         self._arm_scan_timeout()
-        self._append_log("已发送扫描指令：sc\\r\\n")
+        self._append_log("已发送扫描指令：action\\r\\n")
         return True
 
     def _write_serial_command(self, text):
@@ -1310,7 +1501,6 @@ class SerialAssistant(QMainWindow):
             finally:
                 self.serial_port = None
 
-        self.sample_count_spin.setEnabled(True)
         self.start_button.setText("开始识别" if self.current_mode == self.MODE_PREDICT else "开始采集")
         self._update_connection_status(False)
         self._update_progress_text()
@@ -1327,39 +1517,31 @@ class SerialAssistant(QMainWindow):
         self._handle_train_scan_complete(scan_values)
 
     def _handle_train_scan_complete(self, scan_values):
-        self.train_group_scans.append(scan_values)
+        self._append_log(f"已接收当前样品完整扫描：{self._format_scan_values(scan_values)}")
+        self.collecting = False
+        self.start_button.setText("等待标注")
+        self._set_result_state("等待标注", "请选择当前样本标签", note="训练采集")
         self._update_progress_text()
-        current = len(self.train_group_scans)
-        target = self.sample_count_spin.value()
-        self._append_log(
-            f"已接收第 {current}/{target} 次完整扫描："
-            f"{self._format_scan_values(scan_values)}"
-        )
-
-        if current < target:
-            self._request_scan()
-            return
-
-        avg_values = [
-            sum(scan[index] for scan in self.train_group_scans) / current
-            for index in range(len(SPECTRUM_CHANNELS))
-        ]
-        self._append_log(f"当前组平均值：{self._format_scan_values(avg_values)}")
-        self.result_name_label.setText("等待标注")
 
         label = self._prompt_train_label()
         if label is None:
-            self._append_log("未完成标注，当前组数据已作废，不会写入训练集。")
-            self.result_name_label.setText("已作废")
+            self._append_log("未完成标注，当前样品数据已作废，不会写入训练集。")
+            self._set_result_state("已作废", "当前样品未写入训练集", note="未标注")
             self._reset_train_collection_state()
             return
 
-        self._append_train_row(avg_values, label)
+        self._append_train_row(scan_values, label)
         self.saved_group_count += 1
-        self.result_name_label.setText(label)
+        self._set_result_state(
+            label,
+            "训练样本已保存",
+            category=label,
+            collected_at=datetime.now().strftime("%H:%M:%S"),
+            note="训练样本",
+        )
         self._append_log(
-            f"第 {self.saved_group_count} 组样本已保存，标签：{label}，"
-            f"均值：{self._format_scan_values(avg_values)}"
+            f"第 {self.saved_group_count} 个样本已保存，标签：{label}，"
+            f"光谱：{self._format_scan_values(scan_values)}"
         )
         self._reset_train_collection_state()
 
@@ -1374,7 +1556,7 @@ class SerialAssistant(QMainWindow):
         self.pending_scan_values.clear()
         if self.predict_scan_active:
             self.predict_scan_active = False
-            self.result_name_label.setText("采集超时")
+            self._set_result_state("采集超时", "本次识别已取消", note="超时")
             self._append_log("等待扫描结果超时，本次识别已取消。")
             self._show_native_message(QMessageBox.Warning, "采集超时", "设备未在规定时间内返回完整光谱，本次识别已取消。")
             self._update_progress_text()
@@ -1383,15 +1565,9 @@ class SerialAssistant(QMainWindow):
         if not self.collecting:
             return
 
-        collected_count = len(self.train_group_scans)
-        self.result_name_label.setText("采集超时")
-        if collected_count > 0:
-            self._append_log(
-                f"等待第 {collected_count + 1} 次扫描结果超时，当前组已丢弃前面 {collected_count} 次已采集结果。"
-            )
-        else:
-            self._append_log("等待训练扫描结果超时，当前组采集已取消。")
-        self._show_native_message(QMessageBox.Warning, "采集超时", "设备未在规定时间内返回完整光谱，当前训练组已取消。")
+        self._set_result_state("采集超时", "当前样品采集已取消", note="超时")
+        self._append_log("等待训练扫描结果超时，当前样品采集已取消。")
+        self._show_native_message(QMessageBox.Warning, "采集超时", "设备未在规定时间内返回完整光谱，当前样品采集已取消。")
         self._reset_train_collection_state()
 
     def _get_serial_bytesize(self):
